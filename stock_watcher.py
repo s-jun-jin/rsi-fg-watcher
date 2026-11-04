@@ -171,6 +171,18 @@ def main() -> None:
         )
         state[ticker] = f"{today}:{signal}"
 
+    # 일부라도 조회에 실패했다면 하루 한 번 Slack으로 알려서 "전부 감시 중"이라는 착각을 막음
+    if errors and state.get("_warn") != today:
+        try:
+            send_slack(
+                f"⚠️ 종목 감시 오류: {errors}/{len(watchlist)}건 조회 실패 (GitHub Actions 로그 확인).\n"
+                "같은 날 반복 경고는 보내지 않습니다.",
+                dry_run,
+            )
+            state["_warn"] = today
+        except Exception as e:
+            print(f"[WARN] 오류 경고 전송 실패: {type(e).__name__}")
+
     save_state(state)
 
     # 전 종목이 실패하면(데이터 소스 차단·형식 변경 등) 실행을 실패 처리 → GitHub가 메일로 알려줌
