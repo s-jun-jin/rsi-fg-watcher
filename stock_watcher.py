@@ -78,6 +78,10 @@ def send_slack(text: str, dry_run: bool) -> None:
 
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
+    if os.environ.get("SLACK_TEST") == "true":
+        send_slack("✅ RSI 감시 테스트 메시지입니다. Slack 연결이 정상입니다.", dry_run)
+        print("[TEST] 테스트 메시지를 보냈습니다.")
+        return
     today = date.today().isoformat()
     state = load_state()
     errors = 0
