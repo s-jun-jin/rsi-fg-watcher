@@ -3,7 +3,7 @@ RSI 단일 지표 감시 -> Slack 알림 (매수 후보 감시용. 매도 판단
 
 동작:
   - 일봉 종가 기준 RSI(14)가 30 이하로 내려오면 "감시 시작" 알림을 1번 보냅니다.
-  - 이후 RSI가 다시 30 위로 올라오면 "반등 확인" 알림을 1번 보냅니다.
+  - 이후 RSI가 다시 32 위로 올라오면 "반등 확인" 알림을 1번 보냅니다.
   - 감시 중에는 같은 알림을 반복해서 보내지 않습니다.
 
 실행:  export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/XXX/YYY/ZZZ"
@@ -29,7 +29,8 @@ WATCHLIST = {
     "SOXX": "SOXX (반도체 1배)",
 }
 RSI_PERIOD = 14
-RSI_WATCH = 30          # 이하 -> 감시 시작, 다시 초과 -> 반등 확인
+RSI_WATCH = 30          # 이하 -> 감시 시작
+RSI_RELEASE = 32        # 초과 -> 반등 확인 (30 근처에서 오르내릴 때 알림이 반복되지 않도록 여유를 둠)
 MAX_STALE_DAYS = 6      # 마지막 종가가 이보다 오래되면 데이터 오류로 처리
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
@@ -62,7 +63,7 @@ def decide(in_watch: bool, rsi_val: float) -> tuple[str | None, bool]:
     """(이번에 보낼 알림 종류, 새 감시 상태). 종류: ENTER / REBOUND / None"""
     if not in_watch and rsi_val <= RSI_WATCH:
         return "ENTER", True
-    if in_watch and rsi_val > RSI_WATCH:
+    if in_watch and rsi_val > RSI_RELEASE:
         return "REBOUND", False
     return None, in_watch
 
@@ -111,12 +112,12 @@ def main() -> None:
             if kind == "ENTER":
                 text = (f"🟡 *{name}* 감시 시작\n"
                         f"• RSI({RSI_PERIOD}) {rsi_val:.1f} (기준 {RSI_WATCH} 이하)\n"
-                        f"• 종가 {price:,.2f} ({last_day})\n"
+                        f"• 현재가 {price:,.2f} ({last_day}, 장중 값은 마감 때 달라질 수 있음)\n"
                         "• 바로 매수가 아니라 지켜보는 구간입니다.")
             else:
                 text = (f"🟢 *{name}* 반등 확인\n"
-                        f"• RSI({RSI_PERIOD}) {rsi_val:.1f} (기준 {RSI_WATCH} 위로 복귀)\n"
-                        f"• 종가 {price:,.2f} ({last_day})")
+                        f"• RSI({RSI_PERIOD}) {rsi_val:.1f} (기준 {RSI_RELEASE} 위로 복귀)\n"
+                        f"• 현재가 {price:,.2f} ({last_day}, 장중 값은 마감 때 달라질 수 있음)")
             try:
                 send_slack(text, dry_run)
             except Exception as e:
