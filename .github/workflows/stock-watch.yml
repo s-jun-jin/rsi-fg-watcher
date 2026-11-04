@@ -6,7 +6,12 @@ on:
   schedule:
     # 21:30 UTC = 미국 정규장 마감(서머타임 20:00 UTC, 그 외 21:00 UTC) 이후. 일봉 종가가 확정된 뒤라 서머타임 설정 변경 불필요
     - cron: "30 21 * * 1-5"
-  workflow_dispatch: {}   # 수동 실행 버튼
+  workflow_dispatch:      # 수동 실행 버튼
+    inputs:
+      test_slack:
+        description: "Slack 테스트 메시지만 보내기"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,3 +38,4 @@ jobs:
       - run: python stock_watcher.py
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_TEST: ${{ inputs.test_slack }}
