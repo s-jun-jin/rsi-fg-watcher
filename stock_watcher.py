@@ -27,6 +27,8 @@ WATCHLIST = {
     "QQQ": "QQQ (나스닥100 1배)",
     "SOXL": "SOXL (반도체 3배)",
     "SOXX": "SOXX (반도체 1배)",
+    "122630.KS": "KODEX 레버리지 (코스피200 2배)",
+    "233740.KS": "KODEX 코스닥150레버리지 (2배)",
 }
 RSI_PERIOD = 14
 RSI_WATCH = 30          # 이하 -> 감시 시작
