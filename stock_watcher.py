@@ -184,6 +184,11 @@ def main() -> None:
             continue
 
         prev = state.get(ticker)
+        prev_day = prev.get("day") if isinstance(prev, dict) else None
+        if prev_day and str(last_day) < prev_day:
+            # 야후가 이전 실행보다 오래된 데이터를 돌려준 경우: 잘못된 RSI로 알림이 나가지 않게 건너뜀
+            print(f"[STALE] {ticker}: 이전에 본 {prev_day}보다 오래된 데이터({last_day}) -> 이번 실행은 건너뜀")
+            continue
         in_watch = isinstance(prev, dict) and bool(prev.get("in"))
         kind, new_in = decide(in_watch, rsi_val)
         mark = "감시중" if new_in else "-"
@@ -205,7 +210,7 @@ def main() -> None:
                 print(f"[ERROR] {ticker}: Slack 전송 실패 {type(e).__name__}")
                 errors += 1
                 continue  # 상태를 바꾸지 않아 다음 실행에서 다시 시도
-        state[ticker] = {"in": new_in, "rsi": round(rsi_val, 1), "date": today}
+        state[ticker] = {"in": new_in, "rsi": round(rsi_val, 1), "date": today, "day": str(last_day)}
 
     if errors and state.get("_warn") != today:
         try:
