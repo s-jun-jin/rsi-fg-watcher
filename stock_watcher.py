@@ -189,10 +189,25 @@ def main() -> None:
             # 야후가 이전 실행보다 오래된 데이터를 돌려준 경우: 잘못된 RSI로 알림이 나가지 않게 건너뜀
             print(f"[STALE] {ticker}: 이전에 본 {prev_day}보다 오래된 데이터({last_day}) -> 이번 실행은 건너뜀")
             continue
+        # 가격이 직전 값의 1.5배 넘게(또는 2/3 미만으로) 튀면 야후 데이터 오류로 보고 건너뜀. 3번 연속이면 실제 변화로 인정
+        prev_price = prev.get("price") if isinstance(prev, dict) else None
+        skips = prev.get("skips", 0) if isinstance(prev, dict) else 0
+        if prev_price and not (1 / 1.5 < price / prev_price < 1.5) and skips < 3:
+            print(f"[GLITCH] {ticker}: 가격이 {prev_price:,.2f} -> {price:,.2f}로 급변, 이번 실행은 건너뜀({skips + 1}/3)")
+            state[ticker] = dict(prev, skips=skips + 1)
+            continue
         in_watch = isinstance(prev, dict) and bool(prev.get("in"))
         kind, new_in = decide(in_watch, rsi_val)
         mark = "감시중" if new_in else "-"
         print(f"{ticker:6s} {last_day} 종가 {price:9.2f} | RSI {rsi_val:5.1f} | {mark} | {kind or '알림없음'}")
+
+        # 같은 신호가 연속 2번 나올 때만 알림 (일시적인 데이터 튐 방지)
+        pend = prev.get("pend") if isinstance(prev, dict) else None
+        if kind and pend != kind:
+            print(f"[PENDING] {ticker}: {kind} 첫 감지, 다음 실행에서도 같으면 알림")
+            state[ticker] = {"in": in_watch, "rsi": round(rsi_val, 1), "date": today,
+                             "day": str(last_day), "price": price, "pend": kind}
+            continue
 
         if kind:
             if kind == "ENTER":
@@ -210,7 +225,7 @@ def main() -> None:
                 print(f"[ERROR] {ticker}: Slack 전송 실패 {type(e).__name__}")
                 errors += 1
                 continue  # 상태를 바꾸지 않아 다음 실행에서 다시 시도
-        state[ticker] = {"in": new_in, "rsi": round(rsi_val, 1), "date": today, "day": str(last_day)}
+        state[ticker] = {"in": new_in, "rsi": round(rsi_val, 1), "date": today, "day": str(last_day), "price": price}
 
     if errors and state.get("_warn") != today:
         try:
