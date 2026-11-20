@@ -2,12 +2,13 @@
 RSI 단일 지표 감시 -> Slack 알림 (매수 후보 감시용. 매도 판단은 직접 합니다)
 
 동작:
-  - 일봉·주봉 RSI(14)를 각각 감시합니다. 둘 중 하나라도 30 이하로 내려오면 "감시 시작" 알림을 1번 보냅니다.
+  - 일봉·주봉 RSI(14)를 각각 감시합니다. 둘 다 장이 마감된 종가만 사용합니다. (장중 값 무시) 둘 중 하나라도 30 이하로 내려오면 "감시 시작" 알림을 1번 보냅니다.
   - 이후 해당 RSI가 다시 32 위로 올라오면 "반등 확인" 알림을 1번 보냅니다.
   - 알림에는 어느 쪽이 신호인지와 상관없이 일봉·주봉 RSI를 함께 표시합니다.
   - 감시 중에는 같은 알림을 반복해서 보내지 않습니다. (일봉/주봉 상태는 따로 관리)
-  - 주봉은 일봉 종가를 금요일 기준 주 단위로 묶어 계산하며, 마감된 주봉만 씁니다.
-    (이번 주 진행 중인 값은 무시하고, 금요일 미국장 마감 후(21:30 UTC~) 또는 다음 주부터 그 주의 값을 반영)
+  - 주봉은 마감된 일봉 종가를 금요일 기준 주 단위로 묶어 계산합니다.
+    (이번 주 진행 중인 값은 무시하고, 금요일 장 마감 후 또는 다음 주부터 그 주의 값을 반영)
+  - 장 마감 판정: 한국 종목(.KS/.KQ)은 07:00 UTC, 그 외(미국)는 21:30 UTC 이후. 워크플로도 이 시각 뒤에 실행합니다.
 
 실행:  export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/XXX/YYY/ZZZ"
        python stock_watcher.py            # 한 번 검사
@@ -115,7 +116,8 @@ WATCHLIST = {
 RSI_PERIOD = 14
 RSI_WATCH = 30          # 이하 -> 감시 시작
 RSI_RELEASE = 32        # 초과 -> 반등 확인 (30 근처에서 오르내릴 때 알림이 반복되지 않도록 여유를 둠)
-WEEK_CLOSE_UTC = (21, 30)   # 금요일 이 시각(UTC) 이후면 그 주 주봉이 마감된 것으로 봄 (미국장 마감 21:00 UTC 이후)
+CLOSE_UTC_KR = (7, 0)      # 한국장 마감(06:30 UTC) 이후로 보는 시각
+CLOSE_UTC_US = (21, 30)    # 미국장 마감(서머타임 20:00 / 그 외 21:00 UTC) 이후로 보는 시각
 MAX_STALE_DAYS = 6      # 마지막 종가가 이보다 오래되면 데이터 오류로 처리
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
@@ -131,13 +133,29 @@ def rsi_series(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     return 100 - 100 / (1 + gain / loss)
 
 
-def completed_weekly(close: pd.Series, now: datetime | None = None) -> pd.Series:
-    """금요일 기준 주봉 종가 중 '마감된 주'만 반환 (진행 중인 마지막 주는 제외)"""
+def close_cutoff(ticker: str) -> tuple[int, int]:
+    return CLOSE_UTC_KR if ticker.endswith((".KS", ".KQ")) else CLOSE_UTC_US
+
+
+def _day_closed(day: date, cutoff: tuple[int, int], now: datetime) -> bool:
+    return now.date() > day or (now.date() == day and (now.hour, now.minute) >= cutoff)
+
+
+def completed_daily(close: pd.Series, ticker: str, now: datetime | None = None) -> pd.Series:
+    """장이 아직 안 끝난 오늘 봉(장중 값)은 제외한 일봉 종가"""
+    now = now or datetime.now(timezone.utc)
+    if _day_closed(close.index[-1].date(), close_cutoff(ticker), now):
+        return close
+    return close.iloc[:-1]
+
+
+def completed_weekly(close: pd.Series, ticker: str, now: datetime | None = None) -> pd.Series:
+    """금요일 기준 주봉 종가 중 '마감된 주'만 반환 (진행 중인 마지막 주는 제외). close는 마감된 일봉"""
     now = now or datetime.now(timezone.utc)
     weekly = close.resample("W-FRI").last().dropna()
-    week_end = weekly.index[-1].date()
-    closed = now.date() > week_end or (now.date() == week_end and (now.hour, now.minute) >= WEEK_CLOSE_UTC)
-    return weekly if closed else weekly.iloc[:-1]
+    if _day_closed(weekly.index[-1].date(), close_cutoff(ticker), now):
+        return weekly
+    return weekly.iloc[:-1]
 
 
 def load_state() -> dict:
@@ -184,12 +202,13 @@ def main() -> None:
     for ticker, name in WATCHLIST.items():
         try:
             close = yf.Ticker(ticker).history(period="2y")["Close"].dropna()
+            close = completed_daily(close, ticker)   # 장중 값 제외, 마감 종가만
             if len(close) < RSI_PERIOD * 3:
                 raise ValueError("가격 데이터가 부족합니다")
             last_day = close.index[-1].date()
             if date.today() - last_day > timedelta(days=MAX_STALE_DAYS):
                 raise ValueError(f"마지막 종가가 오래됨({last_day})")
-            weekly = completed_weekly(close)
+            weekly = completed_weekly(close, ticker)
             if len(weekly) < RSI_PERIOD * 3:
                 raise ValueError("주봉 데이터가 부족합니다")
             rsi_d = float(rsi_series(close).iloc[-1])
@@ -242,8 +261,8 @@ def main() -> None:
                 status = f"감시 중 (기준 {RSI_WATCH} 이하)" if new_state[p + "in"] else "과매도 아님"
                 rsi_lines.append(f"• {label} RSI({RSI_PERIOD}) {rsi_val:.1f} — {status}")
             text = "\n".join(heads + rsi_lines + [
-                f"• 현재가 {price:,.2f} ({last_day}, 장중 값은 마감 때 달라질 수 있음)",
-                f"• 주봉은 {week_end} 마감 기준 값입니다."])
+                f"• 종가 {price:,.2f} ({last_day} 마감 기준)",
+                f"• 주봉은 {week_end} 주 마감 기준 값입니다."])
             if any(kind == "ENTER" for _, kind, _, _ in events):
                 text += "\n• 바로 매수가 아니라 지켜보는 구간입니다."
             try:
