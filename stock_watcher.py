@@ -2,9 +2,11 @@
 RSI 단일 지표 감시 -> Slack 알림 (매수 후보 감시용. 매도 판단은 직접 합니다)
 
 동작:
-  - 일봉 종가 기준 RSI(14)가 30 이하로 내려오면 "감시 시작" 알림을 1번 보냅니다.
-  - 이후 RSI가 다시 32 위로 올라오면 "반등 확인" 알림을 1번 보냅니다.
-  - 감시 중에는 같은 알림을 반복해서 보내지 않습니다.
+  - 일봉·주봉 RSI(14)를 각각 감시합니다. 둘 중 하나라도 30 이하로 내려오면 "감시 시작" 알림을 1번 보냅니다.
+  - 이후 해당 RSI가 다시 32 위로 올라오면 "반등 확인" 알림을 1번 보냅니다.
+  - 알림에는 어느 쪽이 신호인지와 상관없이 일봉·주봉 RSI를 함께 표시합니다.
+  - 감시 중에는 같은 알림을 반복해서 보내지 않습니다. (일봉/주봉 상태는 따로 관리)
+  - 주봉은 일봉 종가를 금요일 기준 주 단위로 묶어 계산하며, 마지막 주봉은 이번 주 진행 중인 값입니다.
 
 실행:  export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/XXX/YYY/ZZZ"
        python stock_watcher.py            # 한 번 검사
@@ -170,13 +172,17 @@ def main() -> None:
 
     for ticker, name in WATCHLIST.items():
         try:
-            close = yf.Ticker(ticker).history(period="1y")["Close"].dropna()
+            close = yf.Ticker(ticker).history(period="2y")["Close"].dropna()
             if len(close) < RSI_PERIOD * 3:
                 raise ValueError("가격 데이터가 부족합니다")
             last_day = close.index[-1].date()
             if date.today() - last_day > timedelta(days=MAX_STALE_DAYS):
                 raise ValueError(f"마지막 종가가 오래됨({last_day})")
-            rsi_val = float(rsi_series(close).iloc[-1])
+            weekly = close.resample("W-FRI").last().dropna()
+            if len(weekly) < RSI_PERIOD * 3:
+                raise ValueError("주봉 데이터가 부족합니다")
+            rsi_d = float(rsi_series(close).iloc[-1])
+            rsi_w = float(rsi_series(weekly).iloc[-1])
             price = float(close.iloc[-1])
         except Exception as e:
             print(f"[ERROR] {ticker}: {e}")
@@ -196,36 +202,47 @@ def main() -> None:
             print(f"[GLITCH] {ticker}: 가격이 {prev_price:,.2f} -> {price:,.2f}로 급변, 이번 실행은 건너뜀({skips + 1}/3)")
             state[ticker] = dict(prev, skips=skips + 1)
             continue
-        in_watch = isinstance(prev, dict) and bool(prev.get("in"))
-        kind, new_in = decide(in_watch, rsi_val)
-        mark = "감시중" if new_in else "-"
-        print(f"{ticker:6s} {last_day} 종가 {price:9.2f} | RSI {rsi_val:5.1f} | {mark} | {kind or '알림없음'}")
+        old = prev if isinstance(prev, dict) else {}
+        timeframes = [("일봉", "", rsi_d), ("주봉", "w_", rsi_w)]   # (이름, 상태 키 접두사, RSI)
+        new_state = {"rsi": round(rsi_d, 1), "w_rsi": round(rsi_w, 1), "date": today,
+                     "day": str(last_day), "price": price}
+        events = []   # 이번에 알릴 신호: (이름, 종류, 접두사, 이전 감시 상태)
+        summary = []
+        for label, p, rsi_val in timeframes:
+            in_watch = bool(old.get(p + "in"))
+            kind, new_in = decide(in_watch, rsi_val)
+            new_state[p + "in"] = new_in
+            summary.append(f"{label} RSI {rsi_val:5.1f} {'감시중' if new_in else '-'} {kind or ''}".rstrip())
+            # 같은 신호가 연속 2번 나올 때만 알림 (일시적인 데이터 튐 방지)
+            if kind and old.get(p + "pend") != kind:
+                print(f"[PENDING] {ticker} {label}: {kind} 첫 감지, 다음 실행에서도 같으면 알림")
+                new_state[p + "in"] = in_watch
+                new_state[p + "pend"] = kind
+            elif kind:
+                events.append((label, kind, p, in_watch))
+        print(f"{ticker:6s} {last_day} 종가 {price:9.2f} | " + " | ".join(summary))
 
-        # 같은 신호가 연속 2번 나올 때만 알림 (일시적인 데이터 튐 방지)
-        pend = prev.get("pend") if isinstance(prev, dict) else None
-        if kind and pend != kind:
-            print(f"[PENDING] {ticker}: {kind} 첫 감지, 다음 실행에서도 같으면 알림")
-            state[ticker] = {"in": in_watch, "rsi": round(rsi_val, 1), "date": today,
-                             "day": str(last_day), "price": price, "pend": kind}
-            continue
-
-        if kind:
-            if kind == "ENTER":
-                text = (f"🟡 *{name}* 감시 시작\n"
-                        f"• RSI({RSI_PERIOD}) {rsi_val:.1f} (기준 {RSI_WATCH} 이하)\n"
-                        f"• 현재가 {price:,.2f} ({last_day}, 장중 값은 마감 때 달라질 수 있음)\n"
-                        "• 바로 매수가 아니라 지켜보는 구간입니다.")
-            else:
-                text = (f"🟢 *{name}* 반등 확인\n"
-                        f"• RSI({RSI_PERIOD}) {rsi_val:.1f} (기준 {RSI_RELEASE} 위로 복귀)\n"
-                        f"• 현재가 {price:,.2f} ({last_day}, 장중 값은 마감 때 달라질 수 있음)")
+        if events:
+            heads = [f"🟡 *{name}* {label} 감시 시작" if kind == "ENTER" else f"🟢 *{name}* {label} 반등 확인"
+                     for label, kind, _, _ in events]
+            rsi_lines = []
+            for label, p, rsi_val in timeframes:
+                status = f"감시 중 (기준 {RSI_WATCH} 이하)" if new_state[p + "in"] else "과매도 아님"
+                rsi_lines.append(f"• {label} RSI({RSI_PERIOD}) {rsi_val:.1f} — {status}")
+            text = "\n".join(heads + rsi_lines + [
+                f"• 현재가 {price:,.2f} ({last_day}, 장중 값은 마감 때 달라질 수 있고 주봉은 이번 주 진행 중인 값)"])
+            if any(kind == "ENTER" for _, kind, _, _ in events):
+                text += "\n• 바로 매수가 아니라 지켜보는 구간입니다."
             try:
                 send_slack(text, dry_run)
             except Exception as e:
                 print(f"[ERROR] {ticker}: Slack 전송 실패 {type(e).__name__}")
                 errors += 1
-                continue  # 상태를 바꾸지 않아 다음 실행에서 다시 시도
-        state[ticker] = {"in": new_in, "rsi": round(rsi_val, 1), "date": today, "day": str(last_day), "price": price}
+                # 전송 실패한 신호는 상태를 되돌리고 '첫 감지' 상태로 남겨 다음 실행에서 다시 시도
+                for _, kind, p, in_watch in events:
+                    new_state[p + "in"] = in_watch
+                    new_state[p + "pend"] = kind
+        state[ticker] = new_state
 
     if errors and state.get("_warn") != today:
         try:
