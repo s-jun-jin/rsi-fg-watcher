@@ -6,7 +6,8 @@ RSI 단일 지표 감시 -> Slack 알림 (매수 후보 감시용. 매도 판단
   - 이후 해당 RSI가 다시 32 위로 올라오면 "반등 확인" 알림을 1번 보냅니다.
   - 알림에는 어느 쪽이 신호인지와 상관없이 일봉·주봉 RSI를 함께 표시합니다.
   - 감시 중에는 같은 알림을 반복해서 보내지 않습니다. (일봉/주봉 상태는 따로 관리)
-  - 주봉은 일봉 종가를 금요일 기준 주 단위로 묶어 계산하며, 마지막 주봉은 이번 주 진행 중인 값입니다.
+  - 주봉은 일봉 종가를 금요일 기준 주 단위로 묶어 계산하며, 마감된 주봉만 씁니다.
+    (이번 주 진행 중인 값은 무시하고, 금요일 미국장 마감 후(21:30 UTC~) 또는 다음 주부터 그 주의 값을 반영)
 
 실행:  export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/XXX/YYY/ZZZ"
        python stock_watcher.py            # 한 번 검사
@@ -15,7 +16,7 @@ RSI 단일 지표 감시 -> Slack 알림 (매수 후보 감시용. 매도 판단
 import json
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -114,6 +115,7 @@ WATCHLIST = {
 RSI_PERIOD = 14
 RSI_WATCH = 30          # 이하 -> 감시 시작
 RSI_RELEASE = 32        # 초과 -> 반등 확인 (30 근처에서 오르내릴 때 알림이 반복되지 않도록 여유를 둠)
+WEEK_CLOSE_UTC = (21, 30)   # 금요일 이 시각(UTC) 이후면 그 주 주봉이 마감된 것으로 봄 (미국장 마감 21:00 UTC 이후)
 MAX_STALE_DAYS = 6      # 마지막 종가가 이보다 오래되면 데이터 오류로 처리
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
@@ -127,6 +129,15 @@ def rsi_series(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
     return 100 - 100 / (1 + gain / loss)
+
+
+def completed_weekly(close: pd.Series, now: datetime | None = None) -> pd.Series:
+    """금요일 기준 주봉 종가 중 '마감된 주'만 반환 (진행 중인 마지막 주는 제외)"""
+    now = now or datetime.now(timezone.utc)
+    weekly = close.resample("W-FRI").last().dropna()
+    week_end = weekly.index[-1].date()
+    closed = now.date() > week_end or (now.date() == week_end and (now.hour, now.minute) >= WEEK_CLOSE_UTC)
+    return weekly if closed else weekly.iloc[:-1]
 
 
 def load_state() -> dict:
@@ -178,11 +189,12 @@ def main() -> None:
             last_day = close.index[-1].date()
             if date.today() - last_day > timedelta(days=MAX_STALE_DAYS):
                 raise ValueError(f"마지막 종가가 오래됨({last_day})")
-            weekly = close.resample("W-FRI").last().dropna()
+            weekly = completed_weekly(close)
             if len(weekly) < RSI_PERIOD * 3:
                 raise ValueError("주봉 데이터가 부족합니다")
             rsi_d = float(rsi_series(close).iloc[-1])
             rsi_w = float(rsi_series(weekly).iloc[-1])
+            week_end = weekly.index[-1].date()
             price = float(close.iloc[-1])
         except Exception as e:
             print(f"[ERROR] {ticker}: {e}")
@@ -230,7 +242,8 @@ def main() -> None:
                 status = f"감시 중 (기준 {RSI_WATCH} 이하)" if new_state[p + "in"] else "과매도 아님"
                 rsi_lines.append(f"• {label} RSI({RSI_PERIOD}) {rsi_val:.1f} — {status}")
             text = "\n".join(heads + rsi_lines + [
-                f"• 현재가 {price:,.2f} ({last_day}, 장중 값은 마감 때 달라질 수 있고 주봉은 이번 주 진행 중인 값)"])
+                f"• 현재가 {price:,.2f} ({last_day}, 장중 값은 마감 때 달라질 수 있음)",
+                f"• 주봉은 {week_end} 마감 기준 값입니다."])
             if any(kind == "ENTER" for _, kind, _, _ in events):
                 text += "\n• 바로 매수가 아니라 지켜보는 구간입니다."
             try:
